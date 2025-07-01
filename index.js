@@ -14,8 +14,9 @@ const pendingSaves = new Map();
 
 
 // --- FUNGSI BANTUAN --- 
-function splitTextIntoChunks(text, chunkSize = 2000) { 
+function splitTextIntoChunks(text, chunkSize = 1024) { 
     const chunks = []; 
+    if (!text) return ['Tidak ada stack trace.'];
     for (let i = 0; i < text.length; i += chunkSize) { 
         chunks.push(text.substring(i, i + chunkSize)); 
     } 
@@ -67,7 +68,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 new ButtonBuilder().setCustomId('run_deploy_start').setLabel('Jalankan Deploy').setStyle(ButtonStyle.Primary).setEmoji('🚀'), 
                 new ButtonBuilder().setCustomId('view_servers_start').setLabel('Lihat Server').setStyle(ButtonStyle.Secondary).setEmoji('👀') 
             ); 
-            await interaction.reply({ content: 'Pilih tindakan yang ingin Anda lakukan:', components: [initialRow], flags: [MessageFlags.Ephemeral] }); // PERBAIKAN: ephemeral -> flags
+            await interaction.reply({ content: 'Pilih tindakan yang ingin Anda lakukan:', components: [initialRow], flags: [MessageFlags.Ephemeral] });
             return;
         } 
 
@@ -78,7 +79,7 @@ client.on(Events.InteractionCreate, async interaction => {
             const contextId = modalIdParts[1]; 
 
             if (modalType === 'add_server_modal') { 
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] }); // PERBAIKAN: ephemeral -> flags
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
                 const name = interaction.fields.getTextInputValue('serverName'); 
                 const ip = interaction.fields.getTextInputValue('serverIp'); 
                 const username = interaction.fields.getTextInputValue('serverUser'); 
@@ -92,17 +93,15 @@ client.on(Events.InteractionCreate, async interaction => {
                     description: `ID: ${db.id}`.substring(0, 100), 
                     value: db.id, 
                 })); 
-                const selectDbMenu = new StringSelectMenuBuilder() 
-                    .setCustomId(`save_to_db:${interaction.id}`) 
-                    .setPlaceholder('Pilih database tujuan untuk menyimpan server') 
-                    .addOptions(dbOptions.slice(0, 25)); 
+                const selectDbMenu = new StringSelectMenuBuilder().setCustomId(`save_to_db:${interaction.id}`).setPlaceholder('Pilih database tujuan untuk menyimpan server').addOptions(dbOptions.slice(0, 25)); 
                 await interaction.editReply({ content: `Server **${name}** siap disimpan. Silakan pilih database tujuan:`, components: [new ActionRowBuilder().addComponents(selectDbMenu)] }); 
             
             } else if (modalType === 'multi_deploy_add_modal') { 
                 await interaction.deferUpdate(); 
-                const messageId = contextId; 
-                const session = deploymentSessions.get(messageId); 
+                const sessionId = contextId;
+                const session = deploymentSessions.get(sessionId); 
                 if (!session) return interaction.followUp({ content: '❌ Sesi multi-deploy ini sudah tidak aktif.', flags: [MessageFlags.Ephemeral] }); 
+                
                 const name = interaction.fields.getTextInputValue('serverName'); 
                 const keyChunks = splitTextIntoChunks(interaction.fields.getTextInputValue('serverKey')); 
                 const richTextChunks = keyChunks.map(chunk => ({ type: 'text', text: { content: chunk } })); 
@@ -116,23 +115,28 @@ client.on(Events.InteractionCreate, async interaction => {
                     children: [{ object: 'block', type: 'code', code: { rich_text: richTextChunks, language: 'shell' } }], 
                 }); 
                 session.newlyAdded.add(newPage.id); 
+
                 const response = await notion.databases.query({ database_id: session.databaseId }); 
                 const serverOptions = response.results.map(page => ({ 
                     label: page.properties.Name.title[0].plain_text, 
                     description: `IP: ${page.properties.IP.rich_text.length > 0 ? page.properties.IP.rich_text[0].plain_text : 'Tidak ada IP'}`, 
                     value: page.id, 
                 })); 
+                
+                const panelMessage = await client.channels.cache.get(session.channelId)?.messages.fetch(session.panelMessageId);
+                if (!panelMessage) throw new Error("Panel pesan untuk sesi ini tidak ditemukan.");
+
                 const multiSelectMenu = new StringSelectMenuBuilder() 
-                    .setCustomId(`multi_deploy_selection:${messageId}`) 
+                    .setCustomId(`multi_deploy_selection:${sessionId}`) 
                     .setPlaceholder('Pilih server yang sudah ada') 
                     .setMinValues(0).setMaxValues(Math.max(1, serverOptions.length)) 
                     .addOptions(serverOptions.length > 0 ? serverOptions : [{ label: 'Tidak ada server', value: 'no_server' }]); 
                 const actionRow = new ActionRowBuilder().addComponents( 
-                    new ButtonBuilder().setCustomId(`multi_deploy_add_new:${messageId}`).setLabel('Tambah Server Baru').setStyle(ButtonStyle.Success).setEmoji('➕'), 
-                    new ButtonBuilder().setCustomId(`multi_deploy_execute:${messageId}`).setLabel('Jalankan Deploy').setStyle(ButtonStyle.Primary).setEmoji('🚀') 
+                    new ButtonBuilder().setCustomId(`multi_deploy_add_new:${sessionId}`).setLabel('Tambah Server Baru').setStyle(ButtonStyle.Success).setEmoji('➕'), 
+                    new ButtonBuilder().setCustomId(`multi_deploy_execute:${sessionId}`).setLabel('Jalankan Deploy').setStyle(ButtonStyle.Primary).setEmoji('🚀') 
                 ); 
-                const originalMessage = await interaction.channel.messages.fetch(messageId); 
-                await originalMessage.edit({ 
+
+                await panelMessage.edit({ 
                     content: `✅ Server "${name}" berhasil ditambahkan! Daftar di bawah sudah diperbarui.`, 
                     components: [new ActionRowBuilder().addComponents(multiSelectMenu), actionRow] 
                 }); 
@@ -144,12 +148,9 @@ client.on(Events.InteractionCreate, async interaction => {
         if (interaction.isButton()) { 
             const customIdParts = interaction.customId.split(':'); 
             const customId = customIdParts[0]; 
-            const contextId = customIdParts[1] || interaction.message.id; 
-
-            // PERBAIKAN: deferUpdate() dipindahkan ke dalam setiap blok if yang membutuhkannya.
+            const contextId = customIdParts[1];
             
             if (customId === 'add_server_start') { 
-                // Aksi ini hanya memunculkan modal, JANGAN defer.
                 const modal = new ModalBuilder().setCustomId('add_server_modal').setTitle('Tambah Konfigurasi Server Baru'); 
                 const nameInput = new TextInputBuilder().setCustomId('serverName').setLabel("Nama Server").setStyle(TextInputStyle.Short).setRequired(true); 
                 const ipInput = new TextInputBuilder().setCustomId('serverIp').setLabel("IP Address Server").setStyle(TextInputStyle.Short).setRequired(true); 
@@ -159,7 +160,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 await interaction.showModal(modal); 
 
             } else if (customId === 'run_deploy_start') { 
-                await interaction.deferUpdate(); // Defer karena akan mengedit pesan
+                await interaction.deferUpdate();
                 const deployModeRow = new ActionRowBuilder().addComponents( 
                     new ButtonBuilder().setCustomId('single_deploy_init').setLabel('Single Deploy').setStyle(ButtonStyle.Secondary).setEmoji('▶️'), 
                     new ButtonBuilder().setCustomId('multi_deploy_init').setLabel('Multi Deploy').setStyle(ButtonStyle.Success).setEmoji('🚀'), 
@@ -167,7 +168,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 await interaction.editReply({ content: 'Pilih mode deploy:', components: [deployModeRow] }); 
 
             } else if (customId === 'view_servers_start' || customId === 'single_deploy_init' || customId === 'multi_deploy_init') { 
-                await interaction.deferUpdate(); // Defer karena akan ada panggilan API Notion
+                await interaction.deferUpdate();
                 const searchResponse = await notion.search({ filter: { value: 'database', property: 'object' } }); 
                 if (searchResponse.results.length === 0) return interaction.editReply({ content: '❌ Bot tidak memiliki akses ke database manapun.', components: [] }); 
                 let actionType; 
@@ -186,8 +187,8 @@ client.on(Events.InteractionCreate, async interaction => {
                 await interaction.editReply({ content: 'Langkah 1: Pilih database yang akan digunakan.', components: [new ActionRowBuilder().addComponents(selectDbMenu)] }); 
             
             } else if (customId === 'multi_deploy_add_new') {
-                // Aksi ini hanya memunculkan modal, JANGAN defer.
-                const modal = new ModalBuilder().setCustomId(`multi_deploy_add_modal:${contextId}`).setTitle('Tambah Server ke Sesi Deploy'); 
+                const sessionId = contextId;
+                const modal = new ModalBuilder().setCustomId(`multi_deploy_add_modal:${sessionId}`).setTitle('Tambah Server ke Sesi Deploy'); 
                 const nameInput = new TextInputBuilder().setCustomId('serverName').setLabel("Nama Server").setStyle(TextInputStyle.Short).setRequired(true); 
                 const ipInput = new TextInputBuilder().setCustomId('serverIp').setLabel("IP Address Server").setStyle(TextInputStyle.Short).setRequired(true); 
                 const userInput = new TextInputBuilder().setCustomId('serverUser').setLabel("Username SSH").setStyle(TextInputStyle.Short).setRequired(true); 
@@ -196,15 +197,22 @@ client.on(Events.InteractionCreate, async interaction => {
                 await interaction.showModal(modal);
 
             } else if (customId === 'multi_deploy_execute') { 
-                await interaction.deferUpdate(); // Defer karena akan ada panggilan API Notion
-                await interaction.editReply({ content: 'Menggabungkan semua server dan memulai proses...', components: [] }); 
-                const session = deploymentSessions.get(contextId); 
-                if (!session) return interaction.followUp({ content: '❌ Sesi deploy tidak ditemukan atau sudah berakhir.', flags: [MessageFlags.Ephemeral] }); 
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                const sessionId = contextId;
+                const session = deploymentSessions.get(sessionId); 
+                if (!session) return interaction.editReply({ content: '❌ Sesi deploy tidak ditemukan atau sudah berakhir.' }); 
+                
+                const panelMessage = await client.channels.cache.get(session.channelId)?.messages.fetch(session.panelMessageId).catch(() => null);
+                if (panelMessage) await panelMessage.delete();
+
                 const combinedIds = new Set([...session.newlyAdded, ...session.selectedFromMenu]); 
                 if (combinedIds.size === 0) { 
-                    deploymentSessions.delete(contextId); 
-                    return interaction.followUp({ content: '❌ Tidak ada server yang dipilih atau ditambahkan. Proses dibatalkan.', flags: [MessageFlags.Ephemeral] }); 
+                    deploymentSessions.delete(sessionId); 
+                    return interaction.editReply({ content: '❌ Tidak ada server yang dipilih atau ditambahkan. Proses dibatalkan.' }); 
                 } 
+
+                await interaction.editReply({ content: `Menggabungkan ${combinedIds.size} server dan mengirim tugas ke n8n...` });
+                
                 const serverDetailsPromises = Array.from(combinedIds).map(async (pageId) => { 
                     const page = await notion.pages.retrieve({ page_id: pageId }); 
                     const blocksResponse = await notion.blocks.children.list({ block_id: pageId }); 
@@ -216,11 +224,11 @@ client.on(Events.InteractionCreate, async interaction => {
                 const payload = { action: 'multi_deploy', servers: servers, requestedBy: interaction.user.tag }; 
                 const success = await triggerN8nWebhook(payload); 
                 if (success) { 
-                    await interaction.followUp({ content: `🚀 Tugas multi-deploy untuk ${servers.length} server berhasil dikirim ke n8n!`, flags: [MessageFlags.Ephemeral] }); 
+                    await interaction.followUp({ content: `🚀 Tugas multi-deploy berhasil dikirim!`, flags: [MessageFlags.Ephemeral] }); 
                 } else { 
                     await interaction.followUp({ content: `❌ Gagal mengirim batch tugas ke n8n.`, flags: [MessageFlags.Ephemeral] }); 
                 } 
-                deploymentSessions.delete(contextId); 
+                deploymentSessions.delete(sessionId); 
             } 
             return;
         } 
@@ -248,7 +256,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 pendingSaves.delete(originalModalId); 
 
             } else if (customId === 'select_db') { 
-                await interaction.deferUpdate(); 
+                await interaction.deferUpdate();
                 const [selectedDbId, actionType] = interaction.values[0].split('|'); 
                 const response = await notion.databases.query({ database_id: selectedDbId }); 
                 const allServers = response.results; 
@@ -257,16 +265,12 @@ client.on(Events.InteractionCreate, async interaction => {
                     description: `IP: ${page.properties.IP.rich_text.length > 0 ? page.properties.IP.rich_text[0].plain_text : 'N/A'}`, 
                     value: page.id, 
                 })); 
+
                 if (actionType === 'view') { 
                     if (allServers.length === 0) return interaction.editReply({ content: '❌ Database ini kosong.', components: [] });
                     const embed = new EmbedBuilder().setTitle(`Daftar Server`).setColor(0x00AE86).setDescription('Berikut adalah server yang terdaftar. Pilih salah satu di bawah untuk memulai update Docker.').setTimestamp();
                     allServers.slice(0, 25).forEach(p => { 
-                        const server = {
-                            name: p.properties.Name?.title[0]?.plain_text || 'N/A',
-                            ip: p.properties.IP?.rich_text[0]?.plain_text || 'N/A',
-                            status: p.properties.Status?.status?.name || 'N/A',
-                            version: p.properties['Docker Version']?.rich_text[0]?.plain_text || 'N/A',
-                        };
+                        const server = { name: p.properties.Name?.title[0]?.plain_text || 'N/A', ip: p.properties.IP?.rich_text[0]?.plain_text || 'N/A', status: p.properties.Status?.status?.name || 'N/A', version: p.properties['Docker Version']?.rich_text[0]?.plain_text || 'N/A' };
                         embed.addFields({ name: `• ${server.name}`, value: `**IP:** ${server.ip}\n**Status:** ${server.status}\n**Versi:** ${server.version}`, inline: false });
                     });
                     const updateSelectMenu = new StringSelectMenuBuilder().setCustomId('select_server_for_update').setPlaceholder('Pilih server untuk di-update Docker-nya').addOptions(serverOptions.slice(0, 25));
@@ -277,75 +281,108 @@ client.on(Events.InteractionCreate, async interaction => {
                     if (serverOptions.length === 0) return interaction.editReply({ content: `❌ Tidak ada server di database ini untuk dijalankan.`, components: [] }); 
                     const selectMenu = new StringSelectMenuBuilder().setCustomId(`execute_single_deploy`).setPlaceholder('Pilih satu server untuk deploy').addOptions(serverOptions.slice(0, 25)); 
                     await interaction.editReply({ content: 'Langkah 2: Silakan pilih server:', components: [new ActionRowBuilder().addComponents(selectMenu)] }); 
-
+                
                 } else if (actionType === 'multi_run') { 
-                    if (serverOptions.length === 0) return interaction.editReply({ content: `❌ Tidak ada server di database ini untuk dijalankan.`, components: [] }); 
-                    const message = await interaction.editReply({ content: 'Memuat sesi multi-deploy...', components: [] }); 
-                    deploymentSessions.set(message.id, { databaseId: selectedDbId, newlyAdded: new Set(), selectedFromMenu: new Set() }); 
-                    const multiSelectMenu = new StringSelectMenuBuilder().setCustomId(`multi_deploy_selection:${message.id}`).setPlaceholder('Pilih server yang sudah ada').setMinValues(0).setMaxValues(Math.max(1, serverOptions.length)).addOptions(serverOptions.length > 0 ? serverOptions : [{ label: 'Tidak ada server', value: 'no_server' }]); 
+                    if (serverOptions.length === 0) return interaction.editReply({ content: `❌ Tidak ada server di database ini.`, components: [] }); 
+                    
+                    const sessionId = interaction.id; 
+                    await interaction.editReply({ content: 'Membuat panel sesi multi-deploy...', components: [], embeds: [] });
+                    
+                    const multiSelectMenu = new StringSelectMenuBuilder().setCustomId(`multi_deploy_selection:${sessionId}`).setPlaceholder('Pilih server dari daftar').setMinValues(0).setMaxValues(Math.max(1, serverOptions.length)).addOptions(serverOptions); 
                     const actionRow = new ActionRowBuilder().addComponents( 
-                        new ButtonBuilder().setCustomId(`multi_deploy_add_new:${message.id}`).setLabel('Tambah Server Baru').setStyle(ButtonStyle.Success).setEmoji('➕'), 
-                        new ButtonBuilder().setCustomId(`multi_deploy_execute:${message.id}`).setLabel('Jalankan Deploy').setStyle(ButtonStyle.Primary).setEmoji('🚀') 
+                        new ButtonBuilder().setCustomId(`multi_deploy_add_new:${sessionId}`).setLabel('Tambah Server Baru').setStyle(ButtonStyle.Success).setEmoji('➕'), 
+                        new ButtonBuilder().setCustomId(`multi_deploy_execute:${sessionId}`).setLabel('Jalankan Deploy').setStyle(ButtonStyle.Primary).setEmoji('🚀') 
                     ); 
-                    await message.edit({ content: `Langkah 2: Sesi Multi-Deploy. Pilih atau tambah server, lalu Jalankan Deploy.`, components: [new ActionRowBuilder().addComponents(multiSelectMenu), actionRow] }); 
+
+                    const panelMessage = await interaction.channel.send({
+                        content: `**Sesi Multi-Deploy Dimulai (ID: ${sessionId})**\nSilakan pilih server dari menu atau tambahkan server baru. Klik 'Jalankan Deploy' jika sudah selesai.`, 
+                        components: [new ActionRowBuilder().addComponents(multiSelectMenu), actionRow] 
+                    });
+
+                    deploymentSessions.set(sessionId, { 
+                        databaseId: selectedDbId, 
+                        newlyAdded: new Set(), 
+                        selectedFromMenu: new Set(),
+                        panelMessageId: panelMessage.id,
+                        channelId: interaction.channel.id
+                    });
                 } 
 
             } else if (customId.startsWith('multi_deploy_selection')) { 
-                await interaction.deferUpdate();
-                const messageId = contextId; 
-                const session = deploymentSessions.get(messageId); 
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                const sessionId = contextId; 
+                const session = deploymentSessions.get(sessionId); 
                 if (session) { 
                     session.selectedFromMenu = new Set(interaction.values); 
-                    await interaction.followUp({ content: `✅ ${interaction.values.length} server dari menu telah ditambahkan ke sesi.`, flags: [MessageFlags.Ephemeral] }); 
-                } 
+                    await interaction.editReply({ content: `✅ ${interaction.values.length} server dari menu telah ditambahkan ke sesi.`}); 
+                } else {
+                    await interaction.editReply({ content: `❌ Sesi tidak ditemukan.`}); 
+                }
 
-            } else if (customId === 'select_server_for_update') {
+            } else if (customId === 'select_server_for_update' || customId === 'execute_single_deploy') {
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
                 const pageId = interaction.values[0];
                 const page = await notion.pages.retrieve({ page_id: pageId });
                 const name = page.properties.Name.title[0].plain_text;
-                await interaction.editReply(`⚙️ Anda memilih **${name}**. Mengambil detail dan mengirimkan tugas update Docker...`);
+                const actionText = customId === 'select_server_for_update' ? 'update Docker' : 'deploy';
+                await interaction.editReply(`⚙️ Anda memilih **${name}**. Mengambil detail dan mengirimkan tugas ${actionText}...`);
+
                 const ip = page.properties.IP.rich_text[0].plain_text;
                 const username = page.properties.Username.rich_text[0].plain_text;
                 const blocksResponse = await notion.blocks.children.list({ block_id: pageId });
                 const codeBlock = blocksResponse.results.find(block => block.type === 'code');
                 if (!codeBlock) return interaction.editReply(`❌ Tidak dapat menemukan Private Key untuk server ${name}.`);
                 const privateKey = codeBlock.code.rich_text.map(rt => rt.plain_text).join('');
-                const payload = { action: 'update_docker', servers: [{ pageId, ip, username, privateKey }], requestedBy: interaction.user.tag };
+                
+                const action = customId === 'select_server_for_update' ? 'update_docker' : 'single_deploy';
+                const payload = { action, servers: [{ pageId, ip, username, privateKey }], requestedBy: interaction.user.tag };
+                
                 const success = await triggerN8nWebhook(payload);
-                if (success) {
-                    await interaction.followUp({ content: `✅ Tugas update Docker untuk server **${name}** berhasil dikirim ke n8n!`, flags: [MessageFlags.Ephemeral] });
-                } else {
-                    await interaction.followUp({ content: `⚠️ Gagal mengirim tugas update Docker untuk server **${name}** ke n8n.`, flags: [MessageFlags.Ephemeral] });
-                }
 
-            } else if (customId === 'execute_single_deploy') { 
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] }); 
-                const pageId = interaction.values[0]; 
-                const page = await notion.pages.retrieve({ page_id: pageId }); 
-                const name = page.properties.Name.title[0].plain_text; 
-                const ip = page.properties.IP.rich_text[0].plain_text; 
-                const username = page.properties.Username.rich_text[0].plain_text; 
-                const blocksResponse = await notion.blocks.children.list({ block_id: pageId }); 
-                const codeBlock = blocksResponse.results.find(block => block.type === 'code'); 
-                if (!codeBlock) return interaction.editReply('❌ Tidak dapat menemukan Private Key.'); 
-                const privateKey = codeBlock.code.rich_text.map(rt => rt.plain_text).join(''); 
-                await interaction.editReply(`✅ Anda memilih server "${name}". Mengirim tugas ke n8n...`); 
-                const payload = { action: 'single_deploy', servers: [{ pageId: pageId, ip, username, privateKey }], requestedBy: interaction.user.tag }; 
-                const success = await triggerN8nWebhook(payload); 
-                if (success) { 
-                    await interaction.followUp({ content: `🚀 Data untuk server ${name} berhasil dikirim.`, flags: [MessageFlags.Ephemeral] }); 
-                } else { 
-                    await interaction.followUp({ content: `⚠️ Gagal mengirim data untuk server ${name}.`, flags: [MessageFlags.Ephemeral] }); 
-                } 
+                if (success) {
+                    await interaction.followUp({ content: `✅ Tugas ${actionText} untuk server **${name}** berhasil dikirim ke n8n!`, flags: [MessageFlags.Ephemeral] });
+                } else {
+                    await interaction.followUp({ content: `⚠️ Gagal mengirim tugas ${actionText} untuk server **${name}** ke n8n.`, flags: [MessageFlags.Ephemeral] });
+                }
             } 
         }
     } catch (error) {
-        console.error(`Error handling interaction (ID: ${interaction.id}, CustomID: ${interaction.customId || 'N/A'}):`, error);
+        const errorId = interaction.id; 
+        console.error(`[Error ID: ${errorId}] Terjadi error pada interaksi (CustomID: ${interaction.customId || 'N/A'}):`, error);
+
+        const logChannelId = process.env.DISCORD_LOG_CHANNEL_ID;
+        if (logChannelId) {
+            try {
+                const logChannel = await client.channels.fetch(logChannelId);
+                if (logChannel && logChannel.isTextBased()) {
+                    const errorEmbed = new EmbedBuilder()
+                        .setColor(0xFF0000)
+                        .setTitle(`⚠️ Bot Error Ditemukan!`)
+                        .addFields(
+                            { name: 'Error ID', value: `\`${errorId}\``, inline: true },
+                            { name: 'Pengguna', value: `${interaction.user.tag} (\`${interaction.user.id}\`)`, inline: true },
+                            { name: 'Interaction', value: `\`${interaction.customId || 'Command: ' + (interaction.commandName || 'N/A')}\``, inline: false },
+                            { name: 'Pesan Error', value: `\`\`\`${String(error.message || 'Tidak ada pesan error.').substring(0, 1000)}\`\`\`` }
+                        )
+                        .setTimestamp();
+
+                    const stackChunks = splitTextIntoChunks(error.stack);
+                    for(let i = 0; i < stackChunks.length && i < 2; i++) {
+                        errorEmbed.addFields({ name: `Stack Trace (Bagian ${i+1})`, value: `\`\`\`${stackChunks[i]}\`\`\`` });
+                    }
+                    
+                    await logChannel.send({ embeds: [errorEmbed] });
+                }
+            } catch (logError) {
+                console.error("KRITIS: Gagal mengirim log error ke channel log!", logError);
+            }
+        }
+
+        const userMessage = `❌ Terjadi kesalahan internal. Mohon laporkan **Error ID** berikut ke admin: \`${errorId}\``;
         if (interaction.replied || interaction.deferred) {
-            await interaction.followUp({ content: '❌ Terjadi kesalahan saat memproses permintaan Anda.', flags: [MessageFlags.Ephemeral] }).catch(e => console.error("Gagal mengirim 'followUp' error:", e));
+            await interaction.followUp({ content: userMessage, flags: [MessageFlags.Ephemeral] }).catch(e => console.error("Gagal mengirim 'followUp' error:", e));
         } else {
-            await interaction.reply({ content: '❌ Terjadi kesalahan saat memproses permintaan Anda.', flags: [MessageFlags.Ephemeral] }).catch(e => console.error("Gagal mengirim 'reply' error:", e));
+            await interaction.reply({ content: userMessage, flags: [MessageFlags.Ephemeral] }).catch(e => console.error("Gagal mengirim 'reply' error:", e));
         }
     }
 }); 
