@@ -63,12 +63,12 @@ client.on(Events.InteractionCreate, async interaction => {
     try {
         // ================== SLASH COMMANDS ==================
         if (interaction.isChatInputCommand() && interaction.commandName === 'deploy') {
-            // --- PENAMBAHAN TOMBOL BARU ---
             const initialRow = new ActionRowBuilder().addComponents(
                 new ButtonBuilder().setCustomId('add_server_start').setLabel('Tambah Server Baru').setStyle(ButtonStyle.Success).setEmoji('➕'),
                 new ButtonBuilder().setCustomId('run_deploy_start').setLabel('Jalankan Deploy').setStyle(ButtonStyle.Primary).setEmoji('🚀'),
                 new ButtonBuilder().setCustomId('view_servers_start').setLabel('Lihat Server').setStyle(ButtonStyle.Secondary).setEmoji('👀'),
-                new ButtonBuilder().setCustomId('pull_image_init').setLabel('Pull Image').setStyle(ButtonStyle.Secondary).setEmoji('📥') // Tombol baru
+                new ButtonBuilder().setCustomId('pull_image_init').setLabel('Pull Image').setStyle(ButtonStyle.Secondary).setEmoji('📥'),
+                new ButtonBuilder().setCustomId('git_clone_init').setLabel('Git Clone').setStyle(ButtonStyle.Secondary).setEmoji('🔀')
             );
             await interaction.reply({ content: 'Pilih tindakan yang ingin Anda lakukan:', components: [initialRow], flags: [MessageFlags.Ephemeral] });
             return;
@@ -172,6 +172,38 @@ client.on(Events.InteractionCreate, async interaction => {
                 } else {
                     await interaction.followUp({ content: `⚠️ Gagal mengirim tugas pull image untuk server **${name}** ke n8n.`, flags: [MessageFlags.Ephemeral] });
                 }
+            } else if (modalType === 'git_clone_modal') {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                const pageId = contextId;
+                const repoUrl = interaction.fields.getTextInputValue('repoUrl');
+                const destPath = interaction.fields.getTextInputValue('destPath');
+
+                const page = await notion.pages.retrieve({ page_id: pageId });
+                const name = page.properties.Name.title[0].plain_text;
+                await interaction.editReply(`⚙️ Anda memilih **${name}**. Mengambil detail dan mengirimkan tugas git clone dari **${repoUrl}**...`);
+                
+                const ip = page.properties.IP.rich_text[0].plain_text;
+                const username = page.properties.Username.rich_text[0].plain_text;
+                const blocksResponse = await notion.blocks.children.list({ block_id: pageId });
+                const codeBlock = blocksResponse.results.find(block => block.type === 'code');
+                if (!codeBlock) return interaction.editReply(`❌ Tidak dapat menemukan Private Key untuk server ${name}.`);
+                const privateKey = codeBlock.code.rich_text.map(rt => rt.plain_text).join('');
+
+                const payload = { 
+                    action: 'git_clone', 
+                    repoUrl: repoUrl,
+                    destPath: destPath,
+                    server: { pageId, ip, username, privateKey }, 
+                    requestedBy: interaction.user.tag 
+                };
+
+                const success = await triggerN8nWebhook(payload);
+
+                if (success) {
+                    await interaction.followUp({ content: `✅ Tugas git clone untuk server **${name}** berhasil dikirim ke n8n!`, flags: [MessageFlags.Ephemeral] });
+                } else {
+                    await interaction.followUp({ content: `⚠️ Gagal mengirim tugas git clone untuk server **${name}** ke n8n.`, flags: [MessageFlags.Ephemeral] });
+                }
             }
             return; 
         }
@@ -209,8 +241,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 );
                 await interaction.editReply({ content: 'Pilih mode deploy:', components: [deployModeRow] });
 
-            // --- MODIFIKASI: Menambahkan pull_image_init untuk memulai alur pemilihan database ---
-            } else if (customId === 'view_servers_start' || customId === 'single_deploy_init' || customId === 'multi_deploy_init' || customId === 'pull_image_init') {
+            } else if (customId === 'view_servers_start' || customId === 'single_deploy_init' || customId === 'multi_deploy_init' || customId === 'pull_image_init' || customId === 'git_clone_init') {
                 await interaction.deferUpdate();
                 const searchResponse = await notion.search({ filter: { value: 'database', property: 'object' } });
                 if (searchResponse.results.length === 0) return interaction.editReply({ content: '❌ Bot tidak memiliki akses ke database manapun.', components: [] });
@@ -219,7 +250,8 @@ client.on(Events.InteractionCreate, async interaction => {
                 if(customId === 'view_servers_start') actionType = 'view';
                 else if(customId === 'single_deploy_init') actionType = 'single_run';
                 else if(customId === 'multi_deploy_init') actionType = 'multi_run';
-                else if(customId === 'pull_image_init') actionType = 'pull_image_run'; // Action type baru
+                else if(customId === 'pull_image_init') actionType = 'pull_image_run'; 
+                else if(customId === 'git_clone_init') actionType = 'git_clone_run';
 
                 const dbOptions = searchResponse.results.map(db => ({
                     label: (db.title[0]?.plain_text || 'Database tanpa nama').substring(0, 100),
@@ -298,7 +330,6 @@ client.on(Events.InteractionCreate, async interaction => {
                 } else if (actionType === 'multi_run') {
                     // ... (Logika 'multi_run' yang sudah diperbaiki tetap sama)
                 
-                // --- PENAMBAHAN: Handler untuk memilih server di alur 'pull_image' ---
                 } else if (actionType === 'pull_image_run') {
                     if (allServers.length === 0) return interaction.editReply({ content: '❌ Database ini kosong, tidak ada server untuk dipilih.', components: [] });
                     
@@ -308,6 +339,16 @@ client.on(Events.InteractionCreate, async interaction => {
                         .addOptions(serverOptions.slice(0, 25));
 
                     await interaction.editReply({ content: 'Silakan pilih server untuk melakukan pull image:', components: [new ActionRowBuilder().addComponents(selectServerMenu)] });
+                
+                } else if (actionType === 'git_clone_run') {
+                    if (allServers.length === 0) return interaction.editReply({ content: '❌ Database ini kosong, tidak ada server untuk dipilih.', components: [] });
+
+                    const selectServerMenu = new StringSelectMenuBuilder()
+                        .setCustomId('git_clone_select_server')
+                        .setPlaceholder('Langkah 2: Pilih server tujuan')
+                        .addOptions(serverOptions.slice(0, 25));
+
+                    await interaction.editReply({ content: 'Silakan pilih server untuk melakukan git clone:', components: [new ActionRowBuilder().addComponents(selectServerMenu)] });
                 }
 
             } else if (customId.startsWith('multi_deploy_selection')) {
@@ -316,7 +357,6 @@ client.on(Events.InteractionCreate, async interaction => {
             } else if (customId === 'select_server_for_update' || customId === 'execute_single_deploy') {
                 // ... (Logika ini tetap sama)
             
-            // --- PENAMBAHAN: Handler terakhir untuk alur 'pull_image' ---
             } else if (customId === 'pull_image_select_server') {
                 const pageId = interaction.values[0];
                 const modal = new ModalBuilder()
@@ -330,6 +370,32 @@ client.on(Events.InteractionCreate, async interaction => {
                     .setRequired(true);
                 
                 modal.addComponents(new ActionRowBuilder().addComponents(imageNameInput));
+                await interaction.showModal(modal);
+
+            } else if (customId === 'git_clone_select_server') {
+                const pageId = interaction.values[0];
+                const modal = new ModalBuilder()
+                    .setCustomId(`git_clone_modal:${pageId}`)
+                    .setTitle('Git Clone Repository');
+
+                const repoUrlInput = new TextInputBuilder()
+                    .setCustomId('repoUrl')
+                    .setLabel("URL Repository Git")
+                    .setPlaceholder('https://github.com/user/repo.git')
+                    .setStyle(TextInputStyle.Short)
+                    .setRequired(true);
+                    
+                const destPathInput = new TextInputBuilder()
+                    .setCustomId('destPath')
+                    .setLabel("Path Tujuan di Server")
+                    .setPlaceholder('/var/www/my-project')
+                    .setStyle(TextInputStyle.Short)
+                    .setRequired(true);
+
+                modal.addComponents(
+                    new ActionRowBuilder().addComponents(repoUrlInput),
+                    new ActionRowBuilder().addComponents(destPathInput) // <<<--- KESALAHAN DIPERBAIKI DI SINI
+                );
                 await interaction.showModal(modal);
             }
         }
